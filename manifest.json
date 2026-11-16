@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.moeymakes.pinly",
+  "name": "Pinly",
+  "version": "1.0.0",
+  "author": "moeymakes",
+  "description": "Clipboard manager overlay: pinned groups, secret masking, quick edit, paste queue, long searchable history and a screenshots inbox",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "Pinly.qml" }
+}

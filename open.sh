@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# omarchy:summary=Open a clipboard history entry
+# omarchy:group=clipboard
+# omarchy:args=--history-index <index>
+# omarchy:hidden=true
+
+history_index=""
+history_path="${CLIPBOARD_HISTORY_PATH:-$HOME/.local/state/omarchy/clipboard-history.json}"
+
+while (( $# > 0 )); do
+  case "$1" in
+    --history-index)
+      history_index="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Usage: omarchy-clipboard-open --history-index <index>" >&2
+      exit 1
+      ;;
+  esac
+done
+
+[[ $history_index =~ ^[0-9]+$ ]] || exit 1
+[[ -r $history_path ]] || exit 1
+
+entry_type=$(jq -er --argjson index "$history_index" '.[$index].type' "$history_path") || exit 1
+
+open_image() {
+  local path="$1"
+
+  [[ -r $path ]] || exit 1
+  exec "$(dirname "$0")/annotate.sh" "$path"
+}
+
+open_text() {
+  local text="$1"
+  local url=""
+  local open_dir=""
+  local open_file=""
+
+  url=$(grep -Eom1 'https?://[^[:space:]"'\''<>]+' <<<"$text" || true)
+  if [[ -z $url && $text =~ ^[[:space:]]*([[:alnum:]][[:alnum:].-]+\.[[:alpha:]]{2,})(/[^[:space:]]*)?[[:space:]]*$ ]]; then
+    url="https://${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+  fi
+
+  if [[ -n $url ]]; then
+    exec omarchy-launch-browser "$url"
+  fi
+
+  # The runtime dir is private to the user and cleared at logout; the file can hold a secret.
+  open_dir="${XDG_RUNTIME_DIR:-/tmp/clipboard-pins-$UID}/clipboard-open"
+  mkdir -p -m 700 "$open_dir"
+  open_file=$(mktemp --tmpdir="$open_dir" clipboard.XXXXXX.txt) || exit 1
+  printf '%s' "$text" >"$open_file"
+  exec omarchy-launch-editor "$open_file"
+}
+
+case "$entry_type" in
+  image)
+    path=$(jq -er --argjson index "$history_index" '.[$index].path' "$history_path") || exit 1
+    open_image "$path"
+    ;;
+  text)
+    text=$(jq -er --argjson index "$history_index" '.[$index].text' "$history_path") || exit 1
+    open_text "$text"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
