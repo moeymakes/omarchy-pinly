@@ -53,7 +53,10 @@ Item {
   property bool revealSecrets: false
   property bool xformOpen: false
   property bool editing: false
-  property bool editDiscardArmed: false
+  property bool editDirty: false
+  property bool editLoading: false
+  property bool rebuilding: false
+  property string savedFlash: ""
   property string editKey: ""
   property bool askOpen: false
   property string askRaw: ""
@@ -252,6 +255,7 @@ Item {
   }
 
   function close() {
+    root.saveEdit()
     root.cancelConfirm()
     shotsTab.triage = false
     shotsTab.searching = false
@@ -470,6 +474,7 @@ Item {
   // filterOnly: only the search text changed, so the rail and sub-tab counts are still right.
   function rebuildDisplay(filterOnly) {
     root.lastMarkIndex = -1   // row positions are about to change
+    root.rebuilding = true
     if (root.subTab.indexOf("tag:") === 0) {
       var ex = ClipboardHistory.tagCounts(root.pins).tags
       if (!ex.some(function(x) { return "tag:" + x.tag === root.subTab })) root.subTab = "all"
@@ -518,6 +523,7 @@ Item {
         Qt.callLater(function() { if (root.editing) editInput.forceActiveFocus() })
       }
     }
+    root.rebuilding = false
     root.displayRev = root.displayRev + 1
 
     Qt.callLater(function() {
@@ -1326,82 +1332,148 @@ Item {
     root.pasteLiteral(out, false)
   }
 
-  // ---- quick edit (F4): the preview becomes a text box --------------------
-  // A pin is rewritten in place and keeps its label, group, tags and star. A history
-  // entry is never altered: its edit is copied, and the stock plugin then records the
-  // copy as a new entry at the top.
-  // List rebuilds (a new copy, a screenshot) empty and refill the list, so the editor can only
-  // close when the user moves to another row, never on activeRow going null.
-  onSelectedIndexChanged: if (root.editing && root.activeRow && root.activeRow.key !== root.editKey) root.editing = false
+  // ---- editing: the preview text is always editable and saves itself --------
+  // Typing saves half a second after you stop (and when you leave the entry or close the
+  // overlay). A pin keeps its label, group, tags and star; a history entry is rewritten in
+  // place, so its place in the list, time and use count carry over. Nothing to confirm.
+  onActiveRowChanged: root.loadEditor()
+  onRevealSecretsChanged: { root.editKey = ""; root.loadEditor() }
 
-  function beginEdit() {
+  function loadEditor() {
+    if (root.rebuilding) return
     var row = root.activeRow
-    if (!row || row.entryType === "image") return
-    if (root.previewMode === "off") { root.showToast("Make the window bigger (^=) to edit", false, false, null); return }
-    if (row.secret !== "" && root.cfg.mask && !root.revealSecrets) { root.showToast("Press ^R to reveal this entry before editing", false, false, null); return }
-    root.editKey = row.key
-    root.editDiscardArmed = false
-    root.editing = true
-    editInput.text = root.rawText(row)
-    Qt.callLater(function() { editInput.forceActiveFocus(); editInput.cursorPosition = editInput.length })
+    if (!row) return
+    if (row.key === root.editKey) return
+    root.editing = false
+    if (root.editDirty) root.saveEdit()
+    var hidden = row.secret !== "" && root.cfg.mask && !root.revealSecrets
+    var editable = row.entryType !== "image" && !hidden
+    root.editLoading = true
+    editInput.text = editable ? root.rawText(row) : ""
+    root.editLoading = false
+    root.editKey = editable ? row.key : ""
+    root.editDirty = false
   }
 
-  function cancelEdit() {
+  function focusEditor() {
+    if (root.editKey === "") return
+    if (root.previewMode === "off") { root.showToast("Make the window bigger (^=) to edit", false, false, null); return }
+    root.editing = true
+    editInput.forceActiveFocus()
+    editInput.cursorPosition = editInput.length
+  }
+
+  function leaveEditor() {
+    root.saveEdit()
     root.editing = false
     root.refocus()
   }
 
-  // Esc on an edit that changed the text asks once more before throwing the draft away.
-  function escapeEdit() {
-    if (editInput.text !== root.rawByKey(root.editKey) && !root.editDiscardArmed) {
-      root.editDiscardArmed = true
-      root.showToast("Unsaved edit. Press Esc again to discard it, or Ctrl+S to save", false, false, null)
-      return
-    }
-    root.cancelEdit()
+  function flashSaved() {
+    root.savedFlash = "Saved"
+    flashTimer.restart()
   }
 
-  // mode: "save" (pin: rewrite it; history: copy the edit) or "paste" (paste the edit, change nothing stored).
-  function finishEdit(mode) {
-    var row = root.activeRow
-    if (!root.editing || !row || row.key !== root.editKey) { root.cancelEdit(); return }
+  // Rewrites the text of the history entry whose key is oldKey, in the list, the archive and
+  // the stock plugin's own history file (otherwise the old text would come back from there).
+  function rewriteHistory(oldKey, text) {
+    var swap = function(list) {
+      var hit = false
+      var out = []
+      for (var i = 0; i < list.length; i++) {
+        var n = ClipboardHistory.normalizeEntry(list[i])
+        if (n && ClipboardHistory.entryKey(n) === oldKey) { hit = true; n.text = text; out.push(n) }
+        else out.push(list[i])
+      }
+      return { list: out, hit: hit }
+    }
+    var h = swap(root.history)
+    if (h.hit) {
+      root.history = h.list
+      root.archive = h.list
+      if (root.archiveOk) root.writeArchive()
+    }
+    var st = swap(root.stockHistory)
+    if (st.hit && root.historyOk) {
+      root.stockHistory = st.list
+      historyFile.setText(JSON.stringify(st.list, null, 2) + "\n")
+    }
+  }
+
+  function saveEdit() {
+    saveTimer.stop()
+    if (!root.editDirty || root.editKey === "") return
     var text = editInput.text
-    if (text.trim() === "") { root.showToast("Can't use empty text", false, false, null); return }
-    if (mode === "paste") {
-      root.editing = false
-      root.recordUse(row.key)
-      root.opened = false
-      root.pasteLiteral(text, false)
-      return
-    }
-    if (text === root.rawByKey(root.editKey)) { root.cancelEdit(); return }
-    if (!row.pinned) {
-      // The edit is recorded only because the stock plugin sees the new copy, which private mode suppresses.
-      if (root.cfg.paused) { root.showToast("Private mode is on, so this copy would not be kept. Turn it off (^⇧P) first", false, false, null); return }
-      root.editing = false
-      root.opened = false
-      root.pasteLiteral(text, true)
-      return
-    }
-    var idx = ClipboardHistory.pinIndexByKey(root.pins, root.editKey)
-    if (!root.pinsOk) { root.showToast("The pins file could not be read, so nothing can be saved", false, false, null); return }
-    if (idx < 0) { root.cancelEdit(); return }
+    if (text.trim() === "") return
+    var oldKey = root.editKey
     var newKey = ClipboardHistory.entryKey({ type: "text", text: text })
-    if (ClipboardHistory.pinIndexByKey(root.pins, newKey) >= 0) { root.showToast("Another pin already has exactly this text", false, false, null); return }
-    var snapshot = root.pins.slice()
-    var tsnap = root.tombstones
-    root.tombstones = ClipboardHistory.tombstoneFor(root.tombstones, root.editKey, Date.now())
-    root.pins = ClipboardHistory.mapPin(root.pins, idx, function(e) { e.text = text })
+    if (newKey === oldKey) { root.editDirty = false; return }
+    var pinIdx = ClipboardHistory.pinIndexByKey(root.pins, oldKey)
+    if (pinIdx >= 0) {
+      if (!root.pinsOk) { root.showToast("The pins file could not be read, so edits are not saved", false, false, null); return }
+      if (ClipboardHistory.pinIndexByKey(root.pins, newKey) >= 0) { root.showToast("Another pin already has exactly this text", false, false, null); return }
+      root.tombstones = ClipboardHistory.tombstoneFor(root.tombstones, oldKey, Date.now())
+      root.pins = ClipboardHistory.mapPin(root.pins, pinIdx, function(e) { e.text = text })
+      root.savePins()
+      root.saveCfg()
+    }
+    root.rewriteHistory(oldKey, text)
+    var oh = ClipboardHistory.keyHash(oldKey)
+    var nh = ClipboardHistory.keyHash(newKey)
+    if (root.meta[oh]) {
+      var m = Object.assign({}, root.meta)
+      if (!m[nh]) m[nh] = m[oh]
+      delete m[oh]
+      root.meta = m
+      root.saveMetaSoon()
+    }
+    root.editKey = newKey
+    root.editDirty = false
+    root.rebuildDisplay()
+    root.flashSaved()
+  }
+
+  function pasteEdited() {
+    var row = root.activeRow
+    root.saveEdit()
+    var text = editInput.text
+    if (text.trim() === "") return
+    if (row) root.recordUse(root.editKey)
     root.editing = false
+    root.opened = false
+    root.pasteLiteral(text, false)
+  }
+
+  function selectKey(key) {
+    for (var i = 0; i < displayModel.count; i++) {
+      if (displayModel.get(i).key === key) { root.selectedIndex = i; return }
+    }
+  }
+
+  // One click puts the selected entry in a group (pinning it first). Clicking its current
+  // group takes it out of the group again; it stays pinned.
+  function assignGroup(gid) {
+    var row = root.activeRow
+    if (!row || !root.pinsOk) return
+    root.saveEdit()
+    row = root.activeRow
+    var snapshot = root.pins.slice()
+    var key = row.key
+    if (!row.pinned) {
+      var entry = root.history[row.historyIndex]
+      if (!entry) return
+      root.pins = ClipboardHistory.addPin(root.pins, entry, gid)
+    } else {
+      root.pins = ClipboardHistory.setPinGroup(root.pins, row.pinIndex, row.group === gid ? "" : gid)
+    }
+    if (gid) root.lastGroup = gid
     root.savePins()
     root.saveCfg()
     root.rebuildDisplay()
-    for (var i = 0; i < displayModel.count; i++) {
-      if (displayModel.get(i).key === newKey) { root.selectedIndex = i; break }
-    }
-    root.showToast("Pin updated", true, false, snapshot)
-    root.toastTomb = tsnap
-    root.refocus()
+    root.selectKey(key)
+    var now = ClipboardHistory.pinIndexByKey(root.pins, key)
+    var cur = now >= 0 ? ClipboardHistory.normalizeEntry(root.pins[now]) : null
+    root.showToast(cur && cur.group ? "Saved to " + root.groupName(cur.group) : "Pinned, no group", true, false, snapshot)
   }
 
   // ---- templates ({{date}}, {{clip}}, {{ask:Name}}) ---------------------
@@ -1713,6 +1785,18 @@ Item {
   }
 
   Timer {
+    id: saveTimer
+    interval: 500
+    onTriggered: root.saveEdit()
+  }
+
+  Timer {
+    id: flashTimer
+    interval: 1600
+    onTriggered: root.savedFlash = ""
+  }
+
+  Timer {
     id: toastTimer
     interval: 4500
     onTriggered: root.toastText = ""
@@ -1943,7 +2027,7 @@ Item {
           }
 
           if (root.editing) {
-            if (event.key === Qt.Key_Escape) root.escapeEdit()
+            if (event.key === Qt.Key_Escape) root.leaveEditor()
             else editInput.forceActiveFocus()
             event.accepted = true
             return
@@ -2085,7 +2169,7 @@ Item {
             root.beginGroupEdit("rename")
             event.accepted = true
           } else if (event.key === Qt.Key_F4) {
-            root.beginEdit()
+            root.focusEditor()
             event.accepted = true
           } else if (ctrl && event.key === Qt.Key_Z) {
             if (root.toastText) root.undoToast()
@@ -3150,7 +3234,7 @@ Item {
 
           Column {
             id: prevCol
-            visible: root.activeRow !== null
+            visible: root.activeRow !== null || root.editing
             anchors.fill: prevPanel
             anchors.margins: root.sp(14)
             spacing: root.sp(10)
@@ -3323,9 +3407,9 @@ Item {
 
             Text {
               textFormat: Text.PlainText
-              visible: root.activeRow !== null && !root.activeRow.previewImage && !root.editing
+              visible: root.activeRow !== null && !root.activeRow.previewImage && root.editKey === ""
               width: parent.width
-              height: Math.max(root.sp(40), prevCol.height - y - actionRow.height - prevCol.spacing)
+              height: Math.max(root.sp(40), prevCol.height - y - orgRow.height - actionRow.height - prevCol.spacing * 2)
               text: root.activeRow ? (root.activeRow.secret !== "" && root.cfg.mask && !root.revealSecrets ? "Hidden " + root.activeRow.secret.toLowerCase() + ". Press ^R to reveal." : root.activeRow.fullText) : ""
               color: root.foreground
               font.family: root.activeRow && root.activeRow.kind === "code" ? Style.font.menuFamily : root.fontFamily
@@ -3333,21 +3417,17 @@ Item {
               wrapMode: Text.WrapAnywhere
               elide: Text.ElideRight
               verticalAlignment: Text.AlignTop
-              MouseArea {
-                anchors.fill: parent
-                onDoubleClicked: root.beginEdit()
-              }
             }
 
             Rectangle {
               id: editBox
-              visible: root.editing && root.activeRow !== null
+              visible: root.editKey !== "" && (root.activeRow !== null || root.editing)
               width: parent.width
-              height: Math.max(root.sp(60), prevCol.height - y - editRow.height - prevCol.spacing)
+              height: Math.max(root.sp(60), prevCol.height - y - orgRow.height - actionRow.height - prevCol.spacing * 2)
               radius: root.innerRadius
               color: root.background
-              border.width: 2
-              border.color: root.accent
+              border.width: editInput.activeFocus ? 2 : 1
+              border.color: editInput.activeFocus ? root.accent : root.line
               clip: true
 
               Flickable {
@@ -3379,21 +3459,44 @@ Item {
                   wrapMode: TextEdit.WrapAnywhere
                   verticalAlignment: TextEdit.AlignTop
                   onCursorRectangleChanged: editFlick.follow(cursorRectangle)
-                  onTextChanged: root.editDiscardArmed = false
+                  onActiveFocusChanged: if (activeFocus) root.editing = true
+                  onTextChanged: if (!root.editLoading) { root.editDirty = true; saveTimer.restart() }
                   Keys.onPressed: function(event) {
                     var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
-                    if (event.key === Qt.Key_Escape) { root.escapeEdit(); event.accepted = true }
-                    else if (ctrl && event.key === Qt.Key_S) { root.finishEdit("save"); event.accepted = true }
-                    else if (ctrl && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { root.finishEdit("paste"); event.accepted = true }
+                    var shift = (event.modifiers & Qt.ShiftModifier) !== 0
+                    if (event.key === Qt.Key_Escape) { root.leaveEditor(); event.accepted = true }
+                    else if (ctrl && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { root.pasteEdited(); event.accepted = true }
+                    else if (ctrl && !shift && event.key === Qt.Key_S) { root.saveEdit(); root.flashSaved(); event.accepted = true }
+                    else if (ctrl && !shift && event.key === Qt.Key_D) { root.saveEdit(); root.toggleFav(); event.accepted = true }
+                    else if (ctrl && !shift && event.key === Qt.Key_P) { root.saveEdit(); root.pinSelected(); event.accepted = true }
                   }
                 }
+
+                Text {
+                  visible: editInput.length === 0 && !editInput.activeFocus
+                  text: "Click to edit. Changes save automatically."
+                  color: root.muted
+                  font: editInput.font
+                }
+              }
+
+              Text {
+                id: savedTag
+                visible: root.savedFlash !== ""
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: root.sp(8)
+                text: "✓ " + root.savedFlash
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: root.fs(Style.font.caption)
               }
             }
 
             Image {
               visible: root.activeRow !== null && !!root.activeRow.previewImage
               width: parent.width
-              height: Math.max(root.sp(60), prevCol.height - y - actionRow.height - prevCol.spacing)
+              height: Math.max(root.sp(60), prevCol.height - y - orgRow.height - actionRow.height - prevCol.spacing * 2)
               source: root.activeRow ? root.activeRow.previewImage : ""
               fillMode: Image.PreserveAspectFit
               verticalAlignment: Image.AlignTop
@@ -3402,42 +3505,72 @@ Item {
             }
 
             Flow {
-              id: editRow
-              visible: root.editing
+              id: orgRow
+              visible: root.activeRow !== null
               width: parent.width
               spacing: root.sp(6)
 
+              Rectangle {
+                id: favBtn
+                height: root.sp(30)
+                width: favLabel.implicitWidth + root.sp(22)
+                radius: height / 2
+                color: root.activeRow && root.activeRow.fav ? root.selectedBackground : (favMouse.containsMouse ? root.selectedBackground : "transparent")
+                border.width: root.activeRow && root.activeRow.fav ? 2 : 1
+                border.color: root.activeRow && root.activeRow.fav ? root.accent : root.line
+                Text {
+                  id: favLabel
+                  anchors.centerIn: parent
+                  text: root.activeRow && root.activeRow.fav ? "★  Favorite" : "☆  Favorite"
+                  color: root.activeRow && root.activeRow.fav ? root.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: root.fs(Style.font.caption)
+                }
+                MouseArea {
+                  id: favMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: { root.saveEdit(); root.toggleFav() }
+                }
+              }
+
               Repeater {
-                model: [
-                  { id: "paste", label: "Paste edit", hint: "^↵", primary: true },
-                  { id: "save", label: root.activeRow && root.activeRow.pinned ? "Save" : "Copy edit", hint: "^S", primary: false },
-                  { id: "cancel", label: "Cancel", hint: "Esc", primary: false }
-                ]
+                model: root.groups
                 delegate: Rectangle {
                   required property var modelData
+                  readonly property bool on: root.activeRow !== null && root.activeRow.pinned && root.activeRow.group === modelData.id
                   height: root.sp(30)
-                  width: editBtnLabel.implicitWidth + root.sp(22)
-                  radius: root.innerRadius
-                  color: modelData.primary ? root.accent : (editBtnMouse.containsMouse ? root.selectedBackground : "transparent")
-                  border.width: modelData.primary ? 0 : 1
-                  border.color: root.line
-                  Text {
-                    id: editBtnLabel
+                  width: grpRow.implicitWidth + root.sp(22)
+                  radius: height / 2
+                  color: on ? root.badgeBg(root.groupHue(modelData.id)) : (grpMouse.containsMouse ? root.selectedBackground : "transparent")
+                  border.width: on ? 2 : 1
+                  border.color: on ? root.badgeFg(root.groupHue(modelData.id)) : root.line
+                  Row {
+                    id: grpRow
                     anchors.centerIn: parent
-                    text: modelData.label + "  " + modelData.hint
-                    color: modelData.primary ? root.accentText : (editBtnMouse.containsMouse ? root.selectedText : root.foreground)
-                    font.family: root.fontFamily
-                    font.pixelSize: root.fs(Style.font.caption)
+                    spacing: root.sp(6)
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: root.sp(8)
+                      height: width
+                      radius: width / 2
+                      color: root.badgeFg(root.groupHue(modelData.id))
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      text: modelData.name
+                      color: on ? root.badgeFg(root.groupHue(modelData.id)) : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: root.fs(Style.font.caption)
+                    }
                   }
                   MouseArea {
-                    id: editBtnMouse
+                    id: grpMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      if (modelData.id === "cancel") root.cancelEdit()
-                      else root.finishEdit(modelData.id)
-                    }
+                    onClicked: root.assignGroup(modelData.id)
                   }
                 }
               }
@@ -3445,7 +3578,7 @@ Item {
 
             Flow {
               id: actionRow
-              visible: !root.editing
+              visible: root.activeRow !== null
               width: parent.width
               spacing: root.sp(6)
 
@@ -3453,16 +3586,13 @@ Item {
                 model: [
                   { id: "paste", label: "Paste", hint: "↵", primary: true },
                   { id: "copy", label: "Copy", hint: "⇧↵", primary: false },
-                  { id: "edit", label: "Edit", hint: "F4", primary: false },
                   { id: "pin", label: root.activeRow && root.activeRow.pinned ? "Unpin" : "Pin", hint: "^P", primary: false },
-                  { id: "move", label: "Move", hint: "^M", primary: false },
-                  { id: "fav", label: root.activeRow && root.activeRow.fav ? "Unfavorite" : "Favorite", hint: "^D", primary: false },
                   { id: "xform", label: "Transform", hint: "^T", primary: false },
                   { id: "ocr", label: "Text from image", hint: "^O", primary: false }
                 ]
                 delegate: Rectangle {
                   required property var modelData
-                  visible: (modelData.id !== "move" || (root.activeRow !== null && root.activeRow.pinned)) && ((modelData.id !== "xform" && modelData.id !== "edit") || (root.activeRow !== null && root.activeRow.entryType !== "image")) && (modelData.id !== "ocr" || (root.activeRow !== null && root.activeRow.entryType === "image"))
+                  visible: (modelData.id !== "xform" || (root.activeRow !== null && root.activeRow.entryType !== "image")) && (modelData.id !== "ocr" || (root.activeRow !== null && root.activeRow.entryType === "image"))
                   height: root.sp(30)
                   width: visible ? btnLabel.implicitWidth + root.sp(22) : 0
                   radius: root.innerRadius
@@ -3485,12 +3615,9 @@ Item {
                     onClicked: {
                       if (modelData.id === "paste") root.activateIndex(root.selectedIndex)
                       else if (modelData.id === "copy") root.copyIndex(root.selectedIndex)
-                      else if (modelData.id === "edit") root.beginEdit()
                       else if (modelData.id === "pin") root.pinSelected()
-                      else if (modelData.id === "fav") root.toggleFav()
                       else if (modelData.id === "xform") root.openXform()
                       else if (modelData.id === "ocr") root.ocrSelected()
-                      else root.openMove()
                     }
                   }
                 }

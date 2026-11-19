@@ -46,7 +46,7 @@ var shortcuts = [
   { title: "Paste tools", items: [
     ["Ctrl+Enter", "Paste every ticked entry, Tab between each"],
     ["Ctrl+Shift+Enter", "Paste every ticked entry, one per line"],
-    ["F4 or double-click", "Edit the text in the preview. Ctrl+S saves a pin (or copies an edited history entry), Ctrl+Enter pastes it, Esc cancels"],
+    ["Click the text, or F4", "Edit the text in the preview. It saves by itself. Esc leaves the box, Ctrl+Enter pastes your edit"],
     ["Ctrl+T", "Paste as: plain, one line, case, JSON, Base64, URL"],
     ["Ctrl+R", "Show hidden secrets"],
     ["Ctrl+O", "Copy the text found in an image"]

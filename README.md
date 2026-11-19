@@ -53,8 +53,7 @@ passwords and tokens are masked but kept. `Ctrl+R` reveals them.
 
 ![Masked secrets](docs/screenshots/04-secrets.png)
 
-**Quick edit.** `F4` (or double-click the preview) turns the preview into a text box. `Ctrl+Enter` pastes the edit,
-`Ctrl+S` saves a pin in place (or copies the edit of a history entry), `Esc` cancels.
+**Edit in place.** The preview text is always editable: click it (or press `F4`) and type. It saves by itself half a second after you stop, keeping the entry's place, time, label, group and star. Under it, a star button and one chip per group put the entry in your favorites or a group with one click (a click on its current group takes it out). `Ctrl+Enter` pastes your edit, `Esc` leaves the box.
 
 ![Quick edit](docs/screenshots/05-quick-edit.png)
 
@@ -99,7 +98,7 @@ Press `F1` for every shortcut and a short guide.
 | Alt+1..9 | paste row 1 to 9 |
 | Ctrl+P / Ctrl+D / Ctrl+M | pin / star / move to a group |
 | Ctrl+E / Ctrl+Shift+E | label / tags |
-| F4 | quick edit |
+| Click the text, or F4 | edit it; saves automatically |
 | Ctrl+T | paste as (transform) |
 | Ctrl+Space, Ctrl+A, Ctrl+K | tick / tick all matches / clean up |
 | Delete, Ctrl+Z | delete selection, undo |
